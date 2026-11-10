@@ -118,9 +118,39 @@ unsafe fn convert_decode_unit<'a>(decode_unit: PDECODE_UNIT) -> VideoDecodeUnit<
                 (raw.frameHostProcessingLatency / 10) as u64,
             ))
         },
-        timestamp: Duration::from_nanos((raw.presentationTimeUs * 1_000_000_000) / 90_000),
+        // Limelight has already converted its RTP clock to microseconds here.
+        // raw.rtpTimestamp is the separate field expressed in 90-kHz ticks.
+        timestamp: Duration::from_micros(raw.presentationTimeUs),
         color_space: ColorSpace::from_u8(raw.colorspace).expect("valid Colorspace"),
         buffers,
+    }
+}
+
+#[cfg(test)]
+mod presentation_clock_tests {
+    use super::*;
+    use moonlight_common_sys::limelight::_DECODE_UNIT;
+
+    #[test]
+    fn microsecond_timestamps_round_trip_to_the_90khz_rtp_clock() {
+        for fps in [60u64, 90, 120, 144] {
+            for frame in 0..600u64 {
+                let mut raw: _DECODE_UNIT = unsafe { std::mem::zeroed() };
+                raw.presentationTimeUs = frame * 1_000_000 / fps;
+                let unit = unsafe { convert_decode_unit(&mut raw) };
+                assert_eq!(unit.timestamp, Duration::from_micros(raw.presentationTimeUs));
+                let rtp = unit.timestamp.as_nanos() * 90_000 / 1_000_000_000;
+                assert!((rtp as i128 - (frame * 90_000 / fps) as i128).abs() <= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn long_sessions_do_not_overflow_a_microsecond_to_nanosecond_multiply() {
+        let mut raw: _DECODE_UNIT = unsafe { std::mem::zeroed() };
+        raw.presentationTimeUs = 18 * 60 * 60 * 1_000_000;
+        let unit = unsafe { convert_decode_unit(&mut raw) };
+        assert_eq!(unit.timestamp, Duration::from_secs(18 * 60 * 60));
     }
 }
 
